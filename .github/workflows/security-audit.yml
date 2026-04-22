@@ -1,0 +1,65 @@
+name: "Security Audit"
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  bandit:
+    name: Bandit Python Security Scan
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install Bandit
+      run: pip install bandit
+    - name: Run Bandit
+      run: |
+        bandit -r backend/app/ -f json -o bandit-report.json || true
+        bandit -r backend/app/ -f txt
+    - name: Upload Bandit Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: bandit-security-report
+        path: bandit-report.json
+
+  pip-audit:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install dependencies
+      run: |
+        pip install pip-audit
+        pip install -r backend/requirements.txt
+    - name: Run pip-audit
+      run: pip-audit --format json --output pip-audit-report.json || true
+    - name: Upload Report
+      uses: actions/upload-artifact@v4
+      with:
+        name: pip-audit-report
+        path: pip-audit-report.json
+
+  flutter-analyze:
+    name: Flutter Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.24.0'
+    - name: Get dependencies
+      run: flutter pub get
+      working-directory: mobile
+    - name: Analyze security code
+      run: flutter analyze lib/services/security/
+      working-directory: mobile
