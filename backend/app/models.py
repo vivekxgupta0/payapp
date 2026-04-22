@@ -97,6 +97,35 @@ class Transaction(Base):
     receiver = relationship("User", foreign_keys=[receiver_id], back_populates="received_transactions")
 
 
+class DeviceBinding(Base):
+    """Binds a user to a specific device via ECDSA P-256 public key."""
+    __tablename__ = "device_bindings"
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    device_id = Column(String, unique=True, nullable=False, index=True)
+    public_key_pem = Column(String, nullable=False)
+    public_key_base64 = Column(String, nullable=False)
+    platform = Column(String, nullable=True)  # "android" or "ios"
+    os_version = Column(String, nullable=True)
+    is_active = Column(Boolean, default=True)
+    integrity_score = Column(Float, default=1.0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_used_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+
+
+class NonceRegistry(Base):
+    """Global nonce registry for replay attack prevention."""
+    __tablename__ = "nonce_registry"
+
+    nonce = Column(String, primary_key=True)
+    sender_id = Column(String, ForeignKey("users.id"), nullable=False)
+    amount = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=False)
+
+
 class LedgerEntry(Base):
     __tablename__ = "ledger"
 

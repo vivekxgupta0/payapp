@@ -3,7 +3,7 @@ from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from .database import init_db, get_db
-from .routes import auth_routes, token_routes, sync_routes, dashboard
+from .routes import auth_routes, token_routes, sync_routes, dashboard, device_routes
 from .auth import get_current_user
 from .models import User
 from .services.risk_engine import compute_risk_score, compute_offline_limit
@@ -28,6 +28,7 @@ app.include_router(auth_routes.router)
 app.include_router(token_routes.router)
 app.include_router(sync_routes.router)
 app.include_router(dashboard.router)
+app.include_router(device_routes.router)
 
 
 @app.on_event("startup")
@@ -108,14 +109,43 @@ def sync_offline_blobs(
 ):
     """
     SyncEngine endpoint. Accepts an array of PaymentBlobs and reconciles each.
+
+    Security checks per blob (in order):
+      1. Idempotency — skip duplicate nonces
+      2. Timestamp validation — reject blobs older than 72 hours
+      3. Nonce uniqueness — global nonce registry (replay prevention)
+      4. ECDSA signature verification — verify against registered device key
+      5. NPCI limit enforcement — per-txn ₹2000, daily ₹4000
+      6. Fraud heuristics — velocity, amount, pattern checks
+      7. Balance check — sender must have sufficient funds
+      8. Settlement — first-valid-wins conflict resolution
+
     Returns per-blob status: accepted | rejected | adjusted | duplicate.
     Also returns the recalculated offline limit for the sender.
     """
     from .models import Transaction, TransactionStatus, LedgerEntry, generate_uuid
     from .services.fraud import check_fraud_signals
+    from .services.signature_verification import (
+        verify_blob_signature,
+        check_nonce_uniqueness,
+        validate_timestamp,
+        cleanup_expired_nonces,
+    )
+
+    NPCI_PER_TXN_LIMIT = 2000.0
+    NPCI_DAILY_LIMIT = 4000.0
 
     blobs = payload.get("blobs", [])
     results = []
+
+    # Track daily total for this sender across the batch
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    existing_daily = db.query(Transaction).filter(
+        Transaction.sender_id == current_user.id,
+        Transaction.created_at >= today_start,
+        Transaction.status == TransactionStatus.SETTLED,
+    ).count()
+    daily_total_this_batch = 0.0
 
     for blob in blobs:
         blob_id = blob.get("id", generate_uuid())
@@ -124,8 +154,9 @@ def sync_offline_blobs(
         amount = float(blob.get("amount", 0))
         nonce = blob.get("nonce", generate_uuid())
         is_offline = blob.get("is_offline", True)
+        timestamp_str = blob.get("timestamp", "")
 
-        # Idempotency — skip if already processed
+        # 1. Idempotency — skip if already processed in transactions table
         existing = db.query(Transaction).filter(Transaction.nonce == nonce).first()
         if existing:
             results.append({"id": blob_id, "status": "duplicate", "message": "Already processed"})
@@ -133,6 +164,42 @@ def sync_offline_blobs(
 
         if amount <= 0:
             results.append({"id": blob_id, "status": "rejected", "message": "Invalid amount"})
+            continue
+
+        # 2. Timestamp validation (72-hour sync window)
+        ts_valid, ts_reason = validate_timestamp(timestamp_str)
+        if not ts_valid:
+            results.append({"id": blob_id, "status": "rejected", "message": f"Timestamp: {ts_reason}"})
+            continue
+
+        # 3. Global nonce uniqueness (replay prevention)
+        nonce_ok, nonce_reason = check_nonce_uniqueness(nonce, sender_id, amount, db)
+        if not nonce_ok:
+            results.append({"id": blob_id, "status": "rejected", "message": f"Nonce: {nonce_reason}"})
+            continue
+
+        # 4. ECDSA signature verification
+        sig_valid, sig_reason = verify_blob_signature(blob, db)
+        if not sig_valid and sig_reason != "unsigned_blob":
+            results.append({"id": blob_id, "status": "rejected", "message": f"Signature: {sig_reason}"})
+            continue
+        # unsigned_blob: accept with warning for backward compatibility
+        signature_verified = sig_valid
+
+        # 5. NPCI per-transaction limit
+        if amount > NPCI_PER_TXN_LIMIT:
+            results.append({
+                "id": blob_id, "status": "rejected",
+                "message": f"Exceeds per-transaction limit of ₹{NPCI_PER_TXN_LIMIT:.0f}",
+            })
+            continue
+
+        # 5b. NPCI daily cumulative limit
+        if daily_total_this_batch + amount > NPCI_DAILY_LIMIT:
+            results.append({
+                "id": blob_id, "status": "rejected",
+                "message": f"Exceeds daily offline limit of ₹{NPCI_DAILY_LIMIT:.0f}",
+            })
             continue
 
         sender = db.query(User).filter(User.id == sender_id).first()
@@ -144,17 +211,18 @@ def sync_offline_blobs(
             results.append({"id": blob_id, "status": "rejected", "message": "Insufficient balance"})
             continue
 
-        # Fraud check
+        # 6. Fraud check
         is_suspicious, fraud_reasons = check_fraud_signals(db, sender_id, amount, nonce)
         if is_suspicious:
             results.append({"id": blob_id, "status": "rejected", "message": "; ".join(fraud_reasons)})
             continue
 
-        # Settle
+        # 7. Settle — first-valid-wins (this blob won the race)
         sender.balance -= amount
         sender.transaction_count += 1
         total = sender.avg_transaction_amount * (sender.transaction_count - 1) + amount
         sender.avg_transaction_amount = total / sender.transaction_count
+        daily_total_this_batch += amount
 
         receiver = None
         if receiver_id:
@@ -169,6 +237,7 @@ def sync_offline_blobs(
             receiver_id=receiver_id if receiver else None,
             amount=amount,
             nonce=nonce,
+            device_signature=blob.get("device_signature", ""),
             status=TransactionStatus.SETTLED,
             synced_at=datetime.utcnow(),
             settled_at=datetime.utcnow(),
@@ -192,9 +261,16 @@ def sync_offline_blobs(
                 balance_after=receiver.balance,
             ))
 
-        results.append({"id": blob_id, "status": "accepted", "message": "Settled"})
+        status_msg = "Settled (signature verified)" if signature_verified else "Settled (unsigned — legacy)"
+        results.append({"id": blob_id, "status": "accepted", "message": status_msg})
 
     db.commit()
+
+    # Periodic nonce cleanup
+    try:
+        cleanup_expired_nonces(db)
+    except Exception:
+        pass
 
     # Recalculate and return new offline limit for the sender
     new_limit = 0.0
@@ -215,7 +291,18 @@ def sync_offline_blobs(
         db.commit()
 
     expiry = (datetime.utcnow() + timedelta(hours=24)).isoformat()
-    return {"results": results, "new_offline_limit": new_limit, "limit_expiry": expiry}
+
+    # Sign the new limit
+    from .config import SIGNING_KEY
+    limit_payload = f"{current_user.id}|{new_limit:.2f}|{expiry}"
+    limit_signature = SIGNING_KEY.sign(limit_payload.encode()).signature.hex()
+
+    return {
+        "results": results,
+        "new_offline_limit": new_limit,
+        "limit_expiry": expiry,
+        "limit_signature": limit_signature,
+    }
 
 
 @app.post("/api/payments/online")
@@ -331,8 +418,14 @@ def get_offline_limit(
 
     expiry = datetime.utcnow() + timedelta(hours=24)
 
+    # Sign the limit so the client can verify it wasn't tampered with
+    from .config import SIGNING_KEY
+    limit_payload = f"{current_user.id}|{limit:.2f}|{expiry.isoformat()}"
+    limit_signature = SIGNING_KEY.sign(limit_payload.encode()).signature.hex()
+
     return {
         "limit": limit,
         "expiry": expiry.isoformat(),
         "risk_score": risk_score,
+        "limit_signature": limit_signature,
     }

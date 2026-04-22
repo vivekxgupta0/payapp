@@ -105,36 +105,63 @@ class BLEService {
   /// Scan for a BLE peripheral advertising [sessionUuid], connect, and write
   /// [blob] as JSON bytes.  Returns true on success.
   ///
+  /// [onStatus] is called at each step so the UI can show progress.
+  ///
   /// The blob must already exist in the sender's local queue before calling
   /// this method; the queue ensures it is synced to the backend even if BLE
   /// transfer fails.
-  Future<bool> sendBlobViaBLE(PaymentBlob blob, String sessionUuid) async {
+  Future<bool> sendBlobViaBLE(
+    PaymentBlob blob,
+    String sessionUuid, {
+    void Function(String step)? onStatus,
+  }) async {
     if (_isSending) return false;
     _isSending = true;
+
+    void status(String s) => onStatus?.call(s);
 
     try {
       final adapterState = await FlutterBluePlus.adapterState.first;
       if (adapterState != BluetoothAdapterState.on) {
+        status('Bluetooth is off — please enable it and try again');
         _isSending = false;
         return false;
       }
 
-      // Scan specifically for devices advertising sessionUuid as a service.
+      status('Scanning for merchant device…');
+
+      // Scan WITHOUT a service-UUID filter.
+      // iOS CBPeripheralManager can place 128-bit custom UUIDs in the
+      // "overflow" area of the advertisement packet, making them invisible
+      // to CoreBluetooth's withServices filter. We scan broadly and match
+      // the target device client-side.
       final found = Completer<BluetoothDevice?>();
-      final serviceGuid = Guid(sessionUuid);
+      final targetUuid = sessionUuid.toUpperCase();
 
       await FlutterBluePlus.startScan(
-        withServices: [serviceGuid],
-        timeout: const Duration(seconds: 15),
+        timeout: const Duration(seconds: 20),
       );
 
       final scanSub = FlutterBluePlus.scanResults.listen((results) {
-        if (results.isNotEmpty && !found.isCompleted) {
-          found.complete(results.first.device);
+        if (found.isCompleted) return;
+        for (final r in results) {
+          // Match by service UUID (primary check)
+          final uuids = r.advertisementData.serviceUuids
+              .map((u) => u.toString().toUpperCase())
+              .toList();
+          if (uuids.contains(targetUuid)) {
+            found.complete(r.device);
+            return;
+          }
+          // Fallback: match by local name "OfflinePay" if UUID is in overflow
+          if (r.advertisementData.localName == 'OfflinePay') {
+            found.complete(r.device);
+            return;
+          }
         }
       });
 
-      // Also complete when scanning stops (timeout or manually stopped).
+      // Complete with null when scan stops (timeout).
       FlutterBluePlus.isScanning.where((s) => !s).first.then((_) {
         if (!found.isCompleted) found.complete(null);
       });
@@ -146,14 +173,19 @@ class BLEService {
       }
 
       if (device == null) {
+        status('Merchant device not found — make sure their app is open on the "My QR" screen and Bluetooth is on');
         _isSending = false;
         return false;
       }
+
+      status('Found merchant device — connecting…');
 
       // Connect.
       await device.connect(timeout: const Duration(seconds: 10));
 
       try {
+        status('Connected — discovering services…');
+
         // Request larger MTU to reduce chunking for typical blob payloads.
         await device.requestMtu(512);
 
@@ -172,10 +204,13 @@ class BLEService {
         }
 
         if (writeChar == null) {
+          status('Could not find payment characteristic on merchant device');
           await device.disconnect();
           _isSending = false;
           return false;
         }
+
+        status('Transferring payment data…');
 
         // Encode blob as JSON bytes and write in ≤512-byte chunks.
         final bytes =
@@ -191,9 +226,11 @@ class BLEService {
         }
 
         await device.disconnect();
+        status('Payment sent via Bluetooth!');
         _isSending = false;
         return true;
       } catch (e) {
+        status('Transfer failed: $e');
         try {
           await device.disconnect();
         } catch (_) {}
@@ -201,6 +238,7 @@ class BLEService {
         return false;
       }
     } catch (e) {
+      status('BLE error: $e');
       _isSending = false;
       return false;
     }

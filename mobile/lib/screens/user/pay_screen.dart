@@ -386,7 +386,7 @@ class _PayScreenState extends State<PayScreen> {
     bool? bleSuccess;
     if (receiver.bleUuid != null) {
       setState(() => _isBLETransferring = true);
-      bleSuccess = await _bleService.sendBlobViaBLE(blob, receiver.bleUuid!);
+      bleSuccess = await _runBLEWithProgress(blob, receiver.bleUuid!);
       setState(() => _isBLETransferring = false);
     }
 
@@ -413,6 +413,60 @@ class _PayScreenState extends State<PayScreen> {
         ),
       );
     }
+  }
+
+  /// Shows a dialog with live BLE transfer steps and returns the result.
+  Future<bool> _runBLEWithProgress(PaymentBlob blob, String bleUuid) async {
+    String _step = 'Initialising Bluetooth…';
+    StateSetter? _dialogSetState;
+
+    // Show progress dialog immediately
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) {
+          _dialogSetState = setS;
+          return AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: const Row(
+              children: [
+                Icon(Icons.bluetooth_searching, color: AppTheme.primaryColor),
+                SizedBox(width: 10),
+                Text('Sending via Bluetooth'),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const CircularProgressIndicator(),
+                const SizedBox(height: 16),
+                Text(
+                  _step,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 14),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+
+    final result = await _bleService.sendBlobViaBLE(
+      blob,
+      bleUuid,
+      onStatus: (s) {
+        _step = s;
+        _dialogSetState?.call(() {});
+      },
+    );
+
+    // Give the user a moment to read the final status
+    await Future.delayed(const Duration(milliseconds: 800));
+    if (mounted && Navigator.canPop(context)) Navigator.pop(context);
+
+    return result;
   }
 
   Future<void> _processOnlinePayment(

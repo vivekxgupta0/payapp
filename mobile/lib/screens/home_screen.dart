@@ -4,6 +4,7 @@ import '../providers/auth_provider.dart';
 import '../providers/wallet_provider.dart';
 import '../providers/transaction_provider.dart';
 import '../services/sync_engine.dart';
+import '../services/security/security_manager.dart';
 import 'user/user_dashboard.dart';
 import 'user/pay_screen.dart';
 import 'user/wallet_screen.dart';
@@ -44,6 +45,12 @@ class HomeScreenState extends State<HomeScreen> {
 
     // Load local transactions
     await txProvider.loadLocalTransactions(userId: auth.user?.id);
+
+    // Initialize security layer (device keys, integrity check, registration)
+    final secResult = await SecurityManager().initialize();
+    if (!secResult.isDeviceSecure) {
+      debugPrint('SECURITY: Device integrity check flagged issues');
+    }
 
     // Start background sync (existing token-based + new blob-based)
     txProvider.startSync();

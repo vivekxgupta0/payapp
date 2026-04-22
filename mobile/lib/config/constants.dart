@@ -20,7 +20,7 @@ class AppConstants {
 
   // Database
   static const String dbName = 'offline_pay.db';
-  static const int dbVersion = 3;
+  static const int dbVersion = 4;
 
   // Token settings
   static const int maxOfflineTokens = 10;

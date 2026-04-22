@@ -109,6 +109,24 @@ class OfflineStorage {
         PRIMARY KEY (user_id, nonce)
       )
     ''');
+
+    // Nonce tracker (v4) — replay protection for offline transactions
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS nonce_tracker (
+        nonce TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    // Device registration log (v4) — tracks public key registration with backend
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS device_registry (
+        device_id TEXT PRIMARY KEY,
+        public_key TEXT NOT NULL,
+        registered_at TEXT NOT NULL,
+        last_verified TEXT
+      )
+    ''');
   }
 
   Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
@@ -142,6 +160,23 @@ class OfflineStorage {
           created_at TEXT NOT NULL,
           settled_at TEXT,
           PRIMARY KEY (user_id, nonce)
+        )
+      ''');
+    }
+    if (oldVersion < 4) {
+      // v3 → v4: add nonce tracker and device registry for security layer
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS nonce_tracker (
+          nonce TEXT PRIMARY KEY,
+          created_at TEXT NOT NULL
+        )
+      ''');
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS device_registry (
+          device_id TEXT PRIMARY KEY,
+          public_key TEXT NOT NULL,
+          registered_at TEXT NOT NULL,
+          last_verified TEXT
         )
       ''');
     }

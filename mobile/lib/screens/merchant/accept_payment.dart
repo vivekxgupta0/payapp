@@ -507,13 +507,21 @@ class _MyReceiveQRState extends State<_MyReceiveQR> {
   void _onBlobReceived(dynamic blob) {
     if (blob is PaymentBlob && mounted) {
       setState(() => _lastReceivedBlob = blob);
+
+      // Refresh the transaction list so the new blob appears immediately.
+      final auth = context.read<AuthProvider>();
+      context
+          .read<TransactionProvider>()
+          .loadLocalTransactions(userId: auth.user?.id);
+
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'BLE payment received: ₹${blob.amount.toStringAsFixed(2)}',
+            '₹${blob.amount.toStringAsFixed(2)} received via Bluetooth!',
           ),
           backgroundColor: AppTheme.successColor,
           behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         ),
       );
