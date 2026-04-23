@@ -391,6 +391,23 @@ def make_online_payment(
     }
 
 
+@app.get("/api/app/version")
+def get_app_version():
+    """
+    Returns the minimum required app version and latest available version.
+    Clients must check this at startup and block usage if their version
+    is below min_version (MASVS-CODE-2 compliance).
+    """
+    return {
+        "min_version": "1.0.0",
+        "min_build_number": 1,
+        "latest_version": "1.0.0",
+        "update_url": "https://play.google.com/store/apps/details?id=com.offlinepay",
+        "update_message": None,
+        "force_update": False,
+    }
+
+
 @app.get("/api/user/offline-limit")
 def get_offline_limit(
     db: Session = Depends(get_db),

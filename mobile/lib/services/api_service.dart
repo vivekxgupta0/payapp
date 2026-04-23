@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../config/constants.dart';
+import 'security/certificate_pinning_service.dart';
 
 class ApiService {
   static final ApiService _instance = ApiService._internal();
@@ -9,7 +10,10 @@ class ApiService {
   ApiService._internal();
 
   final _storage = const FlutterSecureStorage();
+  final _pinning = CertificatePinningService();
   String? _authToken;
+
+  http.Client get _client => _pinning.pinnedClient;
 
   Future<String?> get authToken async {
     _authToken ??= await _storage.read(key: AppConstants.tokenKey);
@@ -36,7 +40,7 @@ class ApiService {
 
   Future<Map<String, dynamic>> get(String endpoint) async {
     try {
-      final response = await http
+      final response = await _client
           .get(
             Uri.parse('${AppConstants.baseUrl}$endpoint'),
             headers: await _headers(),
@@ -55,7 +59,7 @@ class ApiService {
     Map<String, dynamic> body,
   ) async {
     try {
-      final response = await http
+      final response = await _client
           .post(
             Uri.parse('${AppConstants.baseUrl}$endpoint'),
             headers: await _headers(),
